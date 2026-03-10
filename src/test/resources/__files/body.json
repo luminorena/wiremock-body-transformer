@@ -1,4 +1,5 @@
 {
-	"var": $(var),
+	"var": "$(var)",
 	"got": "it"
 }
+

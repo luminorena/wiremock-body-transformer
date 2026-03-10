@@ -1,20 +1,7 @@
-/*
- * Licensed under the Apache License, Version 2.0 (the "License");
- * you may not use this file except in compliance with the License.
- * You may obtain a copy of the License at
- *
- * http://www.apache.org/licenses/LICENSE-2.0
- *
- * Unless required by applicable law or agreed to in writing, software
- * distributed under the License is distributed on an "AS IS" BASIS,
- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
- * See the License for the specific language governing permissions and
- * limitations under the License.
- */
-
 package com.opentable.extension;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.module.SimpleModule;
 import com.fasterxml.jackson.dataformat.xml.JacksonXmlModule;
 import com.fasterxml.jackson.dataformat.xml.XmlMapper;
 import com.github.tomakehurst.wiremock.client.ResponseDefinitionBuilder;
@@ -25,16 +12,13 @@ import com.github.tomakehurst.wiremock.extension.ResponseDefinitionTransformer;
 import com.github.tomakehurst.wiremock.http.Request;
 import com.github.tomakehurst.wiremock.http.ResponseDefinition;
 import org.apache.commons.lang3.StringUtils;
+import org.apache.commons.lang3.tuple.Pair;
 
 import java.io.IOException;
 import java.io.UnsupportedEncodingException;
 import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
+import java.util.*;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -45,10 +29,10 @@ public class BodyTransformer extends ResponseDefinitionTransformer {
 
     private static final Pattern interpolationPattern = Pattern.compile("\\$\\(.*?\\)");
     private static final Pattern randomIntegerPattern = Pattern.compile("!RandomInteger");
+    private static final Pattern arrayIndexPattern = Pattern.compile("\\[\\d*\\]");
 
     private static ObjectMapper jsonMapper = initJsonMapper();
     private static ObjectMapper xmlMapper = initXmlMapper();
-
     private static ObjectMapper initJsonMapper() {
         return new ObjectMapper();
     }
@@ -56,7 +40,8 @@ public class BodyTransformer extends ResponseDefinitionTransformer {
     private static ObjectMapper initXmlMapper() {
         JacksonXmlModule configuration = new JacksonXmlModule();
         configuration.setXMLTextElementName("value");
-        return new XmlMapper(configuration);
+        SimpleModule module = new SimpleModule().addDeserializer(Object.class, new FixedUntypedObjectDeserializer());
+        return new XmlMapper(configuration).registerModule(module);
     }
 
     @Override
@@ -146,14 +131,11 @@ public class BodyTransformer extends ResponseDefinitionTransformer {
 
     private String transformResponse(Map requestObject, String response) {
         String modifiedResponse = response;
-
         Matcher matcher = interpolationPattern.matcher(response);
         while (matcher.find()) {
             String group = matcher.group();
             modifiedResponse = modifiedResponse.replace(group, getValue(group, requestObject));
-
         }
-
         return modifiedResponse;
     }
 
@@ -171,10 +153,51 @@ public class BodyTransformer extends ResponseDefinitionTransformer {
         Object tempObject = requestObject;
         for (String field : fieldNames) {
             if (tempObject instanceof Map) {
-                tempObject = ((Map) tempObject).get(field);
+
+                Pair<String, Integer> pair = getClearedFieldAndIndex(field);
+
+                tempObject = ((Map) tempObject).get(pair.getLeft());
+
+                if (pair.getRight() != null) {
+                    if (tempObject instanceof List) {
+                        try {
+                            tempObject = ((List) tempObject).get(pair.getRight());
+                        } catch (Exception e) {
+                            System.err.println(String.format("[Body parse error] couldn't get referenced item from list: %s", e.getMessage()));
+                            throw new RuntimeException(e);
+                        }
+                    } else {
+                        System.err.println(String.format("[Body parse error] the referenced item is not list: %s", field));
+                        throw new RuntimeException();
+                    }
+                }
             }
         }
         return String.valueOf(tempObject);
+    }
+
+    /**
+     * return:
+     * 1. cleared field and index for field with index like "item[1]"
+     * 2. field and null for field without index like "item"
+     *
+     * cleared field - the field transformed from "item[1]" to "item"
+     *
+     */
+
+
+    private Pair<String, Integer> getClearedFieldAndIndex(final String field) {
+        Matcher matcher = arrayIndexPattern.matcher(field);
+
+        return matcher.find()
+            ? Pair.of(
+            getClearedField(field),
+            Integer.valueOf(matcher.group().substring(1, matcher.group().length() - 1)))
+            : Pair.of(field, null);
+    }
+
+    private String getClearedField(String field) {
+        return field.split("\\[")[0];
     }
 
     private boolean hasEmptyResponseBody(ResponseDefinition responseDefinition) {
@@ -194,26 +217,26 @@ public class BodyTransformer extends ResponseDefinitionTransformer {
 
     private static List<String> getNamedGroupCandidates(String regex) {
         List<String> namedGroups = new ArrayList<>();
-
         Matcher m = Pattern.compile("\\(\\?<([a-zA-Z][a-zA-Z0-9]*?)>").matcher(regex);
-
         while (m.find()) {
             namedGroups.add(m.group(1));
         }
-
         return namedGroups;
     }
-
     private String decodeUTF8Value(String value) {
-
         String decodedValue = "";
         try {
             decodedValue = URLDecoder.decode(value, StandardCharsets.UTF_8.name());
         } catch (UnsupportedEncodingException e) {
             System.err.println("[Body parse error] Can't decode one of the request parameter. It should be UTF-8 charset.");
         }
-
         return decodedValue;
     }
+
+
+
+
+
+
 
 }
